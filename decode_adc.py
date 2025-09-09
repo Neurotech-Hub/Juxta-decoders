@@ -12,6 +12,8 @@ Combined functionality from adc_header.py for comprehensive analysis.
 import struct
 import os
 import re
+import csv
+import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -735,6 +737,96 @@ def print_event_summary(events: List[Dict[str, Any]]) -> None:
             print()
 
 
+def export_adc_data_to_csv(events: List[Dict[str, Any]], output_dir: str = "./analysis_adc") -> None:
+    """
+    Export ADC event data to CSV file
+    
+    Args:
+        events: List of decoded ADC events
+        output_dir: Directory to save CSV files
+    """
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    
+    if not events:
+        print("No events to export.")
+        return
+    
+    # Export all events to a single CSV file
+    adc_csv_path = os.path.join(output_dir, 'adc_events.csv')
+    
+    with open(adc_csv_path, 'w', newline='') as csvfile:
+        # Define fieldnames for all event types
+        fieldnames = [
+            'event_number', 'event_type', 'event_type_code', 'timestamp', 'datetime',
+            'unix_timestamp', 'microsecond_offset', 'duration_us', 'sample_count',
+            'peak_positive', 'peak_negative', 'peak_positive_mv', 'peak_negative_mv',
+            'raw_samples', 'voltage_samples', 'voltage_min_mv', 'voltage_max_mv',
+            'voltage_mean_mv', 'voltage_std_mv', 'sampling_rate_hz'
+        ]
+        
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        
+        for i, event in enumerate(events):
+            # Calculate derived statistics for waveform events
+            voltage_min_mv = None
+            voltage_max_mv = None
+            voltage_mean_mv = None
+            voltage_std_mv = None
+            sampling_rate_hz = None
+            
+            if event['event_type'] in ['timer_burst', 'peri_event']:
+                voltage_samples = event['voltage_samples']
+                if voltage_samples:
+                    voltage_min_mv = min(voltage_samples)
+                    voltage_max_mv = max(voltage_samples)
+                    voltage_mean_mv = sum(voltage_samples) / len(voltage_samples)
+                    
+                    # Calculate standard deviation
+                    if len(voltage_samples) > 1:
+                        variance = sum((v - voltage_mean_mv) ** 2 for v in voltage_samples) / (len(voltage_samples) - 1)
+                        voltage_std_mv = variance ** 0.5
+                    
+                    # Calculate sampling rate
+                    duration_seconds = event['duration_us'] / 1_000_000.0
+                    if duration_seconds > 0:
+                        sampling_rate_hz = len(voltage_samples) / duration_seconds
+            
+            # Format datetime string
+            datetime_str = datetime.fromtimestamp(event['absolute_timestamp']).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            
+            # Prepare row data
+            row_data = {
+                'event_number': i + 1,
+                'event_type': event['event_type'],
+                'event_type_code': f"0x{event['event_type_code']:02X}",
+                'timestamp': event['absolute_timestamp'],
+                'datetime': datetime_str,
+                'unix_timestamp': event['unix_timestamp'],
+                'microsecond_offset': event['microsecond_offset'],
+                'duration_us': event['duration_us'],
+                'sample_count': event.get('sample_count', 0),
+                'peak_positive': event.get('peak_positive', ''),
+                'peak_negative': event.get('peak_negative', ''),
+                'peak_positive_mv': event.get('peak_positive_mv', ''),
+                'peak_negative_mv': event.get('peak_negative_mv', ''),
+                'raw_samples': json.dumps(list(event.get('raw_samples', []))) if 'raw_samples' in event else '',
+                'voltage_samples': json.dumps(event.get('voltage_samples', [])) if 'voltage_samples' in event else '',
+                'voltage_min_mv': voltage_min_mv if voltage_min_mv is not None else '',
+                'voltage_max_mv': voltage_max_mv if voltage_max_mv is not None else '',
+                'voltage_mean_mv': voltage_mean_mv if voltage_mean_mv is not None else '',
+                'voltage_std_mv': voltage_std_mv if voltage_std_mv is not None else '',
+                'sampling_rate_hz': sampling_rate_hz if sampling_rate_hz is not None else ''
+            }
+            
+            writer.writerow(row_data)
+    
+    print(f"ADC events exported to: {adc_csv_path}")
+    print(f"Exported {len(events)} events with complete header and sample data")
+    print(f"Note: raw_samples and voltage_samples are JSON-encoded arrays for easy parsing")
+
+
 def main():
     """
     Main function to decode ADC file and generate plots, with optional header analysis
@@ -796,6 +888,10 @@ def main():
             
             # Print summary
             print_event_summary(events)
+            
+            # Export to CSV
+            print(f"\nExporting data to CSV...")
+            export_adc_data_to_csv(events)
             
             # Generate plots (if available)
             if PLOTTING_AVAILABLE:
