@@ -48,6 +48,7 @@ Thumbs.db
 figures/*.jpg
 figures/*.png
 figures/*.pdf
+analysis/
 *.txt
 !requirements.txt
 
