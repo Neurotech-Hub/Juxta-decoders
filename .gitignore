@@ -58,3 +58,5 @@ analysis/
 # Temporary files
 *.tmp
 *.temp
+*.jpg
+*.jpeg

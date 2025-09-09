@@ -1,17 +1,32 @@
-# ADC File Decoder
+# JUXTA Data Decoders
 
-This project provides a Python script to decode ADC burst data from JUXTA device files and generate visualization plots.
+This project provides Python scripts to decode and analyze data from JUXTA device files, including ADC burst data and social interaction data.
 
 ## Features
 
+### ADC Data Decoder (`decode_adc.py`)
 - Decodes ADC burst records from binary format
 - Extracts timing information and sample data
 - Converts raw samples to voltage values
+- Supports multiple event types (timer burst, single event, peri-event)
 - Generates multiple plot types:
-  - Overlaid burst data
-  - Individual burst plots
+  - Overlaid event data
+  - Individual event plots
   - Summary statistics
-- Saves plots as JPG files in the `./figures` directory
+- Saves plots as JPG files in the `./analysis_adc/figures` directory
+
+### Social Data Decoder (`decoder_social.py`)
+- Decodes social interaction records from binary format
+- Extracts device scan data, motion detection, and environmental sensors
+- Resolves MAC addresses using MACIDX files
+- Generates multiple plot types:
+  - Device detection timeline
+  - Motion detection timeline
+  - Battery and temperature monitoring
+  - **RSSI timeline with device proximity analysis**
+  - Summary statistics
+- **Exports data to CSV files** for further analysis
+- Saves plots as JPG files in the `./analysis_social/figures` directory
 
 ## Setup Instructions for macOS
 
@@ -66,11 +81,12 @@ python adc_decoder.py
 
 ## Usage
 
-### Running the Script
+### Running the Scripts
 
+#### ADC Data Decoder
 1. **From VS Code**: 
    - Open the project in VS Code
-   - Open `adc_decoder.py`
+   - Open `decode_adc.py`
    - Click the "Play" button (▶️) in the top-right corner of the editor
 
 2. **From Terminal**:
@@ -78,19 +94,113 @@ python adc_decoder.py
    # Make sure virtual environment is activated
    source .venv/bin/activate
    
-   # Run the script
-   python adc_decoder.py
+   # Run the ADC decoder
+   python3 decode_adc.py
    ```
+
+#### Social Data Decoder
+1. **From VS Code**: 
+   - Open the project in VS Code
+   - Open `decoder_social.py`
+   - Click the "Play" button (▶️) in the top-right corner of the editor
+
+2. **From Terminal**:
+   ```bash
+   # Make sure virtual environment is activated
+   source .venv/bin/activate
+   
+   # Run the social data decoder
+   python3 decoder_social.py
+   ```
+
+#### Analysis Mode
+Both decoders support comprehensive analysis mode:
+
+```bash
+python3 decode_adc.py --header
+python3 decoder_social.py --header
+```
+
+#### Time Format Options (Social Decoder)
+The social decoder supports different time formats:
+
+```bash
+# Default: Local timestamps (e.g., "2025-09-09 17:43:00")
+python3 decoder_social.py
+
+# Simple time format (e.g., "17:43")
+python3 decoder_social.py --simple-time
+python3 decoder_social.py -s
+```
+
+### Line Plot Visualizations
+
+The social data decoder generates comprehensive **line plots** that show data trends over time:
+
+- **Device Timeline**: Device detections over time
+- **Motion Timeline**: Motion events per minute over time  
+- **Battery & Temperature**: System health monitoring over time
+- **RSSI Timeline**: Signal strength for each device over time
+- **Summary Plots**: Record types, device counts, motion counts, and average RSSI over time
+- **Reference lines** (RSSI Timeline): 
+  - Green dashed line at -30 dBm (very close)
+  - Orange dashed line at -60 dBm (close)
+  - Red dashed line at -90 dBm (far)
+
+These line plots are perfect for analyzing:
+- **Social interaction patterns** - when devices were nearby
+- **Proximity trends** - how close devices were over time
+- **Device movement** - signal strength changes indicating movement
+- **System health** - battery and temperature monitoring
+- **Activity patterns** - motion and device detection trends
+- **Temporal analysis** - social activity patterns throughout the day
+
+### Working with CSV Data
+
+The CSV files use **JSON encoding** for device data, making them easy to work with in Python:
+
+```python
+import csv
+import json
+
+# Read the CSV
+with open('social_events.csv', 'r') as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        # Parse JSON-encoded device data
+        device_macs = json.loads(row['device_macs']) if row['device_macs'] else []
+        device_rssis = json.loads(row['device_rssis']) if row['device_rssis'] else []
+        
+        # Now you have clean arrays: ['FF0123', 'BABE99'] and [-73, -62]
+        print(f"Time: {row['time']}, Devices: {device_macs}, RSSIs: {device_rssis}")
+```
+
+See `example_csv_usage.py` for a complete example of analyzing the CSV data.
 
 ### Output
 
-The script will:
-1. Decode the test file `hublink_file_content_20250908081219_250908.txt`
+The scripts will:
+1. Decode the most recent data file in their respective directories
 2. Print a summary of the decoded data to the console
-3. Generate plots and save them to the `./figures/` directory:
-   - `all_bursts_overlay.jpg` - All bursts overlaid on one plot
-   - `burst_01.jpg`, `burst_02.jpg`, etc. - Individual burst plots
-   - `burst_summary.jpg` - Summary statistics
+3. Generate plots and save them to their respective directories:
+
+**ADC Data Plots** (`./analysis_adc/figures/`):
+   - `all_events_overlay.jpg` - All events overlaid on one plot
+   - `timer_burst_01.jpg`, `single_event_01.jpg`, etc. - Individual event plots
+   - `event_summary.jpg` - Summary statistics
+
+**Social Data Plots** (`./analysis_social/figures/`):
+   - `device_timeline.jpg` - Device detection timeline
+   - `motion_timeline.jpg` - Motion detection timeline
+   - `battery_temperature.jpg` - Battery and temperature monitoring
+   - `rssi_timeline.jpg` - **RSSI timeline with device proximity analysis**
+   - `social_summary.jpg` - Summary statistics
+
+**CSV Data Export** (`./analysis_social/`):
+   - `system_events.csv` - System events (boot, connection, settings, errors)
+   - `social_events.csv` - Social interaction data with **JSON-encoded device arrays**
+     - `device_macs`: JSON array of device MAC addresses (e.g., `["FF0123", "BABE99"]`)
+     - `device_rssis`: JSON array of corresponding RSSI values (e.g., `[-73, -62]`)
 
 ## File Format
 

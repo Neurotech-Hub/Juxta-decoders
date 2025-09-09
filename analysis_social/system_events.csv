@@ -1,0 +1,2 @@
+timestamp,minute_of_day,time,event_type,event_name,battery_level,temperature_c
+,1214,2025-09-09 20:14:00,system_event,boot,190,0

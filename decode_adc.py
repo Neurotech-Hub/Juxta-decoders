@@ -537,7 +537,7 @@ def decode_adc_file(filename: str) -> List[Dict[str, Any]]:
     return events
 
 
-def plot_event_data(events: List[Dict[str, Any]], output_dir: str = "./analysis/figures") -> None:
+def plot_event_data(events: List[Dict[str, Any]], output_dir: str = "./analysis_adc/figures") -> None:
     """
     Generate plots for ADC event data - supports multiple event types
     
@@ -742,7 +742,7 @@ def main():
     import sys
     
     # Look for the most recent hublink file in the analysis directory
-    analysis_dir = './analysis'
+    analysis_dir = './analysis_adc'
     if not os.path.exists(analysis_dir):
         print(f"Analysis directory '{analysis_dir}' not found!")
         return
@@ -755,7 +755,7 @@ def main():
     
     if not test_file:
         print("Error: No ADC data files found in analysis directory!")
-        print("Please ensure there's a .txt file with ADC data in the ./analysis directory.")
+        print("Please ensure there's a .txt file with ADC data in the ./analysis_adc directory.")
         return
     
     # Show which file was selected
@@ -801,7 +801,7 @@ def main():
             if PLOTTING_AVAILABLE:
                 print(f"\nGenerating plots...")
                 plot_event_data(events)
-                print(f"Plots saved to ./analysis/figures/ directory")
+                print(f"Plots saved to ./analysis_adc/figures/ directory")
             else:
                 print(f"\nSkipping plot generation (matplotlib/numpy not available)")
                 print("Install with: pip install matplotlib numpy")
