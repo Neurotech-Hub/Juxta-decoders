@@ -27,15 +27,15 @@ except ImportError:
     print("Warning: matplotlib/numpy not available. Plotting functionality disabled.")
 
 
-def find_most_recent_hublink_file(analysis_dir: str) -> Optional[str]:
+def find_adc_file(analysis_dir: str) -> Optional[str]:
     """
-    Find the most recent hublink file based on timestamp in filename
+    Find the single ADC file in the directory
     
     Args:
         analysis_dir: Directory to search for .txt files
         
     Returns:
-        str: Path to the most recent file, or None if no valid files found
+        str: Path to the ADC file, or None if no valid file found
     """
     if not os.path.exists(analysis_dir):
         return None
@@ -45,31 +45,57 @@ def find_most_recent_hublink_file(analysis_dir: str) -> Optional[str]:
     if not txt_files:
         return None
     
-    # Pattern to match hublink filename format: hublink_file_content_YYYYMMDDHHMMSS_*.txt
-    hublink_pattern = re.compile(r'hublink_file_content_(\d{14})_\d+\.txt')
+    # Pattern to match JX filename format: JX_DEVICEID_YYMMDD.txt
+    jx_pattern = re.compile(r'JX_([A-Z0-9]+)_(\d{6})\.txt')
     
     valid_files = []
     for filename in txt_files:
-        match = hublink_pattern.match(filename)
+        match = jx_pattern.match(filename)
         if match:
-            timestamp_str = match.group(1)
+            device_id = match.group(1)
+            recording_date_str = match.group(2)
             try:
-                # Parse timestamp: YYYYMMDDHHMMSS
-                timestamp = datetime.strptime(timestamp_str, '%Y%m%d%H%M%S')
-                valid_files.append((timestamp, filename))
+                # Parse recording date: YYMMDD
+                year = 2000 + int(recording_date_str[:2])
+                month = int(recording_date_str[2:4])
+                day = int(recording_date_str[4:6])
+                recording_date = datetime(year, month, day)
+                valid_files.append((recording_date, filename, device_id))
             except ValueError:
-                # Invalid timestamp format, skip this file
+                # Invalid date format, skip this file
                 continue
     
-    if not valid_files:
-        # No valid hublink files found, return the first .txt file as fallback
-        return os.path.join(analysis_dir, txt_files[0])
+    if len(valid_files) == 0:
+        print("Error: No valid JX_DEVICEID_YYMMDD.txt files found!")
+        return None
+    elif len(valid_files) > 1:
+        print("Error: Multiple ADC files found in directory:")
+        for _, filename, device_id in valid_files:
+            print(f"  - {filename} (Device: {device_id})")
+        print("Only one ADC file is allowed per analysis directory.")
+        return None
     
-    # Sort by timestamp (most recent first) and return the most recent
-    valid_files.sort(key=lambda x: x[0], reverse=True)
-    most_recent_file = valid_files[0][1]
+    # Return the single valid file
+    return os.path.join(analysis_dir, valid_files[0][1])
+
+
+def extract_device_id_from_filename(filename: str) -> Optional[str]:
+    """
+    Extract device ID from JX filename format
     
-    return os.path.join(analysis_dir, most_recent_file)
+    Args:
+        filename: Filename in format JX_DEVICEID_YYMMDD.txt
+        
+    Returns:
+        str: Device ID, or None if parsing fails
+    """
+    pattern = re.compile(r'JX_([A-Z0-9]+)_\d{6}\.txt')
+    match = pattern.match(os.path.basename(filename))
+    
+    if match:
+        return match.group(1)
+    
+    return None
 
 
 def find_valid_headers(file_data: bytes) -> List[Dict[str, Any]]:
@@ -539,12 +565,13 @@ def decode_adc_file(filename: str) -> List[Dict[str, Any]]:
     return events
 
 
-def plot_event_data(events: List[Dict[str, Any]], output_dir: str = "./analysis_adc/figures") -> None:
+def plot_event_data(events: List[Dict[str, Any]], device_id: str = "", output_dir: str = "./analysis_adc/figures") -> None:
     """
     Generate plots for ADC event data - supports multiple event types
     
     Args:
         events: List of decoded event records
+        device_id: Device ID for plot titles
         output_dir: Directory to save plot files
     """
     if not PLOTTING_AVAILABLE:
@@ -578,7 +605,8 @@ def plot_event_data(events: List[Dict[str, Any]], output_dir: str = "./analysis_
         
         plt.xlabel('Time (ms)')
         plt.ylabel('Voltage (mV)')
-        plt.title('ADC Data - All Waveform Events Overlaid\n(Data section only, header info in individual plots)')
+        device_title = f" (Device: {device_id})" if device_id else ""
+        plt.title(f'ADC Data - All Waveform Events Overlaid{device_title}\n(Data section only, header info in individual plots)')
         plt.grid(True, alpha=0.3)
         plt.legend()
         plt.tight_layout()
@@ -601,7 +629,8 @@ def plot_event_data(events: List[Dict[str, Any]], output_dir: str = "./analysis_
         sampling_rate = len(event['voltage_samples']) / duration_seconds if duration_seconds > 0 else 0
         
         event_type_display = event['event_type'].replace('_', ' ').title()
-        plt.title(f'ADC Data - {event_type_display} {i+1}\n'
+        device_title = f" (Device: {device_id})" if device_id else ""
+        plt.title(f'ADC Data - {event_type_display} {i+1}{device_title}\n'
                  f'Timestamp: {timestamp_str}\n'
                  f'Header: Unix={event["unix_timestamp"]}, Micro={event["microsecond_offset"]}μs\n'
                  f'Data: {len(event["voltage_samples"])} samples, Duration: {event["duration_us"]}μs\n'
@@ -833,7 +862,7 @@ def main():
     """
     import sys
     
-    # Look for the most recent hublink file in the analysis directory
+    # Look for the most recent juxta file in the analysis directory
     analysis_dir = './analysis_adc'
     if not os.path.exists(analysis_dir):
         print(f"Analysis directory '{analysis_dir}' not found!")
@@ -842,28 +871,37 @@ def main():
     print("ADC File Decoder and Header Analyzer")
     print("====================================")
     
-    # Find the most recent hublink file
-    test_file = find_most_recent_hublink_file(analysis_dir)
+    # Find the single ADC file
+    test_file = find_adc_file(analysis_dir)
     
     if not test_file:
-        print("Error: No ADC data files found in analysis directory!")
-        print("Please ensure there's a .txt file with ADC data in the ./analysis_adc directory.")
+        print("Error: No valid ADC data files found in analysis directory!")
+        print("Please ensure there's a single JX_DEVICEID_YYMMDD.txt file with ADC data in the ./analysis_adc directory.")
         return
     
-    # Show which file was selected
+    # Show which file was selected and extract device ID
     filename = os.path.basename(test_file)
+    device_id = extract_device_id_from_filename(filename)
     print(f"Selected file: {filename}")
     
-    # If it's a hublink file, show the timestamp
-    hublink_pattern = re.compile(r'hublink_file_content_(\d{14})_\d+\.txt')
-    match = hublink_pattern.match(filename)
-    if match:
-        timestamp_str = match.group(1)
-        try:
-            timestamp = datetime.strptime(timestamp_str, '%Y%m%d%H%M%S')
-            print(f"File timestamp: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-        except ValueError:
-            pass
+    if device_id:
+        print(f"Device ID: {device_id}")
+        
+        # Extract and show recording date
+        jx_pattern = re.compile(r'JX_([A-Z0-9]+)_(\d{6})\.txt')
+        match = jx_pattern.match(filename)
+        if match:
+            recording_date_str = match.group(2)
+            try:
+                year = 2000 + int(recording_date_str[:2])
+                month = int(recording_date_str[2:4])
+                day = int(recording_date_str[4:6])
+                recording_date = datetime(year, month, day)
+                print(f"Recording date: {recording_date.strftime('%Y-%m-%d')}")
+            except ValueError:
+                pass
+    else:
+        print("Warning: Could not extract device ID from filename")
     print()
     
     # Check command line arguments for analysis mode
@@ -896,7 +934,7 @@ def main():
             # Generate plots (if available)
             if PLOTTING_AVAILABLE:
                 print(f"\nGenerating plots...")
-                plot_event_data(events)
+                plot_event_data(events, device_id)
                 print(f"Plots saved to ./analysis_adc/figures/ directory")
             else:
                 print(f"\nSkipping plot generation (matplotlib/numpy not available)")

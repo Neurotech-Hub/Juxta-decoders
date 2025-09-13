@@ -1,2 +1,2 @@
-timestamp,minute_of_day,time,event_type,event_name,battery_level,temperature_c
-,1214,2025-09-09 20:14:00,system_event,boot,190,0
+minute_of_day,utc_timestamp,local_timestamp,utc_datetime,local_datetime,event_type,event_name,battery_level,temperature_c
+776,1757768160.0,1757768160.0,2025-09-13 12:56:00 UTC,2025-09-13 07:56:00,system_event,boot,8,0
