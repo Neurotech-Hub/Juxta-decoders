@@ -35,28 +35,54 @@ env/
 *.swo
 *~
 
-# OS
+# macOS
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
+**/.DS_Store
+
+# Windows
 ehthumbs.db
 Thumbs.db
+Desktop.ini
+**/Thumbs.db
 
-# Project specific
-figures/*.jpg
-figures/*.png
-figures/*.pdf
-analysis/
-*.txt
+# Images (all formats, recursively)
+**/*.jpg
+**/*.jpeg
+**/*.png
+**/*.gif
+**/*.bmp
+**/*.tiff
+**/*.tif
+**/*.svg
+**/*.webp
+**/*.ico
+
+# Documents/PDFs (recursively)
+**/*.pdf
+
+# Data files (recursively)
+**/*.csv
+**/*.json
+**/*.xml
+**/*.xlsx
+**/*.xls
+
+# Project specific data files
+analysis_adc/
+analysis_social/
+**/*.txt
 !requirements.txt
 
-# Logs
+# Logs (recursively)
+**/*.log
 *.log
 
-# Temporary files
+# Temporary files (recursively)
+**/*.tmp
+**/*.temp
 *.tmp
 *.temp
-*.jpg
-*.jpeg
