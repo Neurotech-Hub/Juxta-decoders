@@ -72,8 +72,6 @@ Desktop.ini
 **/*.xls
 
 # Project specific data files
-analysis_adc/
-analysis_social/
 **/*.txt
 !requirements.txt
 
