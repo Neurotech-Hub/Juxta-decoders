@@ -98,6 +98,27 @@ def extract_device_id_from_filename(filename: str) -> Optional[str]:
     return None
 
 
+def generate_device_date_prefix(filename: str) -> str:
+    """
+    Generate DEVICEID_YYMMDD prefix from JX filename format
+    
+    Args:
+        filename: Filename in format JX_DEVICEID_YYMMDD.txt
+        
+    Returns:
+        str: DEVICEID_YYMMDD prefix, or empty string if parsing fails
+    """
+    pattern = re.compile(r'JX_([A-Z0-9]+)_(\d{6})\.txt')
+    match = pattern.match(os.path.basename(filename))
+    
+    if match:
+        device_id = match.group(1)
+        date_str = match.group(2)  # YYMMDD format
+        return f"{device_id}_{date_str}"
+    
+    return ""
+
+
 def find_valid_headers(file_data: bytes) -> List[Dict[str, Any]]:
     """
     Find all valid headers in the file data using 13-byte header format
@@ -565,13 +586,14 @@ def decode_adc_file(filename: str) -> List[Dict[str, Any]]:
     return events
 
 
-def plot_event_data(events: List[Dict[str, Any]], device_id: str = "", output_dir: str = "./analysis_adc/figures") -> None:
+def plot_event_data(events: List[Dict[str, Any]], device_id: str = "", filename: str = "", output_dir: str = "./analysis_adc/figures") -> None:
     """
     Generate plots for ADC event data - supports multiple event types
     
     Args:
         events: List of decoded event records
         device_id: Device ID for plot titles
+        filename: Source filename (used to generate DEVICEID_YYMMDD prefix)
         output_dir: Directory to save plot files
     """
     if not PLOTTING_AVAILABLE:
@@ -582,13 +604,16 @@ def plot_event_data(events: List[Dict[str, Any]], device_id: str = "", output_di
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
     
+    # Generate filename prefix
+    device_date_prefix = generate_device_date_prefix(filename) if filename else ""
+    prefix = f"{device_date_prefix}_" if device_date_prefix else ""
+    
     # Clear existing files in the figures directory
     if os.path.exists(output_dir):
         for filename in os.listdir(output_dir):
             file_path = os.path.join(output_dir, filename)
             if os.path.isfile(file_path):
                 os.remove(file_path)
-                print(f"Deleted existing file: {filename}")
     
     # Separate events by type
     waveform_events = [e for e in events if e['event_type'] in ['timer_burst', 'peri_event']]
@@ -610,7 +635,7 @@ def plot_event_data(events: List[Dict[str, Any]], device_id: str = "", output_di
         plt.grid(True, alpha=0.3)
         plt.legend()
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'all_events_overlay.jpg'), dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(output_dir, f'{prefix}all_events_overlay.jpg'), dpi=300, bbox_inches='tight')
         plt.close()
     
     # Plot 2: Individual waveform event plots
@@ -640,7 +665,7 @@ def plot_event_data(events: List[Dict[str, Any]], device_id: str = "", output_di
         plt.ylabel('Voltage (mV)')
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'{event["event_type"]}_{i+1:02d}.jpg'), dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(output_dir, f'{prefix}{event["event_type"]}_{i+1:02d}.jpg'), dpi=300, bbox_inches='tight')
         plt.close()
     
     # Plot 3: Data analysis summary
@@ -709,7 +734,7 @@ def plot_event_data(events: List[Dict[str, Any]], device_id: str = "", output_di
         plt.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'event_summary.jpg'), dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(output_dir, f'{prefix}event_summary.jpg'), dpi=300, bbox_inches='tight')
         plt.close()
 
 
@@ -766,12 +791,13 @@ def print_event_summary(events: List[Dict[str, Any]]) -> None:
             print()
 
 
-def export_adc_data_to_csv(events: List[Dict[str, Any]], output_dir: str = "./analysis_adc") -> None:
+def export_adc_data_to_csv(events: List[Dict[str, Any]], filename: str = "", output_dir: str = "./analysis_adc") -> None:
     """
     Export ADC event data to CSV file
     
     Args:
         events: List of decoded ADC events
+        filename: Source filename (used to generate DEVICEID_YYMMDD prefix)
         output_dir: Directory to save CSV files
     """
     # Ensure output directory exists
@@ -781,8 +807,12 @@ def export_adc_data_to_csv(events: List[Dict[str, Any]], output_dir: str = "./an
         print("No events to export.")
         return
     
+    # Generate filename prefix
+    device_date_prefix = generate_device_date_prefix(filename) if filename else ""
+    prefix = f"{device_date_prefix}_" if device_date_prefix else ""
+    
     # Export all events to a single CSV file
-    adc_csv_path = os.path.join(output_dir, 'adc_events.csv')
+    adc_csv_path = os.path.join(output_dir, f'{prefix}adc_events.csv')
     
     with open(adc_csv_path, 'w', newline='') as csvfile:
         # Define fieldnames for all event types
@@ -929,12 +959,12 @@ def main():
             
             # Export to CSV
             print(f"\nExporting data to CSV...")
-            export_adc_data_to_csv(events)
+            export_adc_data_to_csv(events, test_file)
             
             # Generate plots (if available)
             if PLOTTING_AVAILABLE:
                 print(f"\nGenerating plots...")
-                plot_event_data(events, device_id)
+                plot_event_data(events, device_id, test_file)
                 print(f"Plots saved to ./analysis_adc/figures/ directory")
             else:
                 print(f"\nSkipping plot generation (matplotlib/numpy not available)")

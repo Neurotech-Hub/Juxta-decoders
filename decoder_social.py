@@ -21,29 +21,30 @@ from typing import List, Dict, Any, Optional
 try:
     import matplotlib.pyplot as plt
     import numpy as np
+    import networkx as nx
     PLOTTING_AVAILABLE = True
 except ImportError:
     PLOTTING_AVAILABLE = False
-    print("Warning: matplotlib/numpy not available. Plotting functionality disabled.")
+    print("Warning: matplotlib, numpy, or networkx not available. Plotting functionality disabled.")
 
 
-def find_social_file(analysis_dir: str) -> Optional[str]:
+def find_social_files(analysis_dir: str) -> List[str]:
     """
-    Find the single social data file in the directory
+    Find all social data files in the directory
     
     Args:
         analysis_dir: Directory to search for .txt files
         
     Returns:
-        str: Path to the social data file, or None if no valid file found
+        List[str]: List of paths to social data files, sorted by date
     """
     if not os.path.exists(analysis_dir):
-        return None
+        return []
     
     txt_files = [f for f in os.listdir(analysis_dir) if f.endswith('.txt')]
     
     if not txt_files:
-        return None
+        return []
     
     # Pattern to match JX filename format: JX_DEVICEID_YYMMDD.txt
     # Exclude MACIDX files from this search
@@ -72,16 +73,11 @@ def find_social_file(analysis_dir: str) -> Optional[str]:
     
     if len(valid_files) == 0:
         print("Error: No valid JX_DEVICEID_YYMMDD.txt files found!")
-        return None
-    elif len(valid_files) > 1:
-        print("Error: Multiple social data files found in directory:")
-        for _, filename, device_id in valid_files:
-            print(f"  - {filename} (Device: {device_id})")
-        print("Only one social data file is allowed per analysis directory.")
-        return None
+        return []
     
-    # Return the single valid file
-    return os.path.join(analysis_dir, valid_files[0][1])
+    # Sort by date and return file paths
+    valid_files.sort(key=lambda x: x[0])  # Sort by recording_date
+    return [os.path.join(analysis_dir, filename) for _, filename, _ in valid_files]
 
 
 def extract_device_id_from_filename(filename: str) -> Optional[str]:
@@ -101,6 +97,66 @@ def extract_device_id_from_filename(filename: str) -> Optional[str]:
         return match.group(1)
     
     return None
+
+
+def generate_device_date_prefix(filename: str) -> str:
+    """
+    Generate DEVICEID_YYMMDD prefix from JX filename format
+    
+    Args:
+        filename: Filename in format JX_DEVICEID_YYMMDD.txt
+        
+    Returns:
+        str: DEVICEID_YYMMDD prefix, or empty string if parsing fails
+    """
+    pattern = re.compile(r'JX_([A-Z0-9]+)_(\d{6})\.txt')
+    match = pattern.match(os.path.basename(filename))
+    
+    if match:
+        device_id = match.group(1)
+        date_str = match.group(2)  # YYMMDD format
+        return f"{device_id}_{date_str}"
+    
+    return ""
+
+
+def generate_device_date_range_prefix(filenames: List[str]) -> str:
+    """
+    Generate DEVICEID_YYMMDD-YYMMDD prefix from multiple JX filenames
+    
+    Args:
+        filenames: List of filenames in format JX_DEVICEID_YYMMDD.txt
+        
+    Returns:
+        str: DEVICEID_YYMMDD-YYMMDD prefix, or empty string if parsing fails
+    """
+    if not filenames:
+        return ""
+    
+    pattern = re.compile(r'JX_([A-Z0-9]+)_(\d{6})\.txt')
+    device_ids = set()
+    dates = []
+    
+    for filename in filenames:
+        match = pattern.match(os.path.basename(filename))
+        if match:
+            device_id = match.group(1)
+            date_str = match.group(2)  # YYMMDD format
+            device_ids.add(device_id)
+            dates.append(date_str)
+    
+    if not device_ids or not dates:
+        return ""
+    
+    # Use the first device ID (should be the same for all files)
+    device_id = list(device_ids)[0]
+    
+    # Sort dates and create range
+    dates.sort()
+    if len(dates) == 1:
+        return f"{device_id}_{dates[0]}"
+    else:
+        return f"{device_id}_{dates[0]}-{dates[-1]}"
 
 
 def find_macidx_file(analysis_dir: str, device_id: str) -> Optional[str]:
@@ -233,22 +289,16 @@ def decode_social_record(file_data: bytes, offset: int = 0, use_local_time: bool
     Returns:
         dict: Decoded record information, or None if invalid
     """
-    # Need at least 6 bytes for header
-    if len(file_data) < offset + 6:
+    # Need at least 3 bytes minimum
+    if len(file_data) < offset + 3:
         return None
-        
-    header = file_data[offset:offset + 6]
     
-    # Unpack header using big-endian format
-    minute, device_count, motion_count, battery_level, temperature = struct.unpack('>HBBBB', header)
-    
-    # Convert temperature from unsigned to signed
-    if temperature > 127:
-        temperature = temperature - 256
+    # Read first 3 bytes to determine record type
+    minute, device_count = struct.unpack('>HB', file_data[offset:offset + 3])
     
     # Determine record type based on device_count
     if device_count >= 0xF1:
-        # System event record
+        # System event record - only 3 bytes
         record_type = 'system_event'
         event_names = {
             0xF1: 'boot',
@@ -259,7 +309,22 @@ def decode_social_record(file_data: bytes, offset: int = 0, use_local_time: bool
         event_name = event_names.get(device_count, 'unknown')
         record_size = 3  # System events are 3 bytes
         devices = []
+        # System events don't have temperature/battery/motion data
+        battery_level = 0
+        temperature = 0
+        motion_count = 0
     else:
+        # Device scan record - need full 6-byte header
+        if len(file_data) < offset + 6:
+            return None
+            
+        header = file_data[offset:offset + 6]
+        minute, device_count, motion_count, battery_level, temperature = struct.unpack('>HBBBB', header)
+        
+        # Convert temperature from unsigned to signed
+        if temperature > 127:
+            temperature = temperature - 256
+        
         # Device scan record
         record_size = 6 + (2 * device_count)
         if len(file_data) < offset + record_size:
@@ -473,10 +538,9 @@ def analyze_social_records(filename: str, mac_table: Optional[Dict[int, Dict[str
         if vr['devices']:
             print(f"    Devices detected: {len(vr['devices'])}")
             for j, device in enumerate(vr['devices']):
-                # Use device_name and mac_address if available (after MAC resolution)
-                device_name = device.get('device_name', f"MAC_{device['mac_index']}")
-                mac_address = device.get('mac_address', f"Index_{device['mac_index']}")
-                print(f"      Device {j+1}: {device_name} ({mac_address}), RSSI {device['rssi_dbm']} dBm")
+                # Use device_name from CSV data
+                device_name = device.get('device_name', f"Unknown_Device")
+                print(f"      Device {j+1}: {device_name}, RSSI {device['rssi_dbm']} dBm")
         print()
     
     # Report invalid records
@@ -587,6 +651,47 @@ def decode_social_file(filename: str, use_local_time: bool = True) -> List[Dict[
     return valid_records
 
 
+def combine_social_data_from_files(filenames: List[str], mac_table: Optional[Dict[int, Dict[str, Any]]] = None, use_local_time: bool = True) -> List[Dict[str, Any]]:
+    """
+    Combine social data from multiple files, maintaining chronological order
+    
+    Args:
+        filenames: List of paths to social data files
+        mac_table: MAC address lookup table (index -> MAC info)
+        use_local_time: Whether to use local time format for display strings
+        
+    Returns:
+        list: Combined list of decoded social records, sorted chronologically
+    """
+    all_records = []
+    
+    for filename in filenames:
+        print(f"Processing file: {os.path.basename(filename)}")
+        
+        # Decode records from this file
+        file_records = decode_social_file(filename, use_local_time)
+        
+        # Add source file information to each record
+        for record in file_records:
+            record['source_file'] = os.path.basename(filename)
+            record['source_device_id'] = extract_device_id_from_filename(filename)
+            record['source_recording_date'] = extract_recording_day_from_filename(filename)
+        
+        all_records.extend(file_records)
+        print(f"  Found {len(file_records)} records")
+    
+    # Sort all records by recording date + minute_of_day to maintain proper chronological order
+    # Since minute_of_day is in UTC time, we need to combine it with the recording date
+    all_records.sort(key=lambda x: (x.get('source_recording_date', datetime.min), x['minute_of_day']))
+    
+    # Resolve MAC addresses if MAC table is available
+    if mac_table:
+        all_records = resolve_mac_addresses(all_records, mac_table)
+    
+    print(f"Combined total: {len(all_records)} records from {len(filenames)} files")
+    return all_records
+
+
 def extract_recording_day_from_filename(filename: str) -> Optional[datetime]:
     """
     Extract the recording day from JX filename format
@@ -687,10 +792,14 @@ def calculate_time_axis_range_unix(timestamps: List[float]) -> tuple:
         tick_interval_seconds = 900  # Every 15 minutes
     elif data_span_seconds <= 21600:  # 6 hours or less
         tick_interval_seconds = 1800  # Every 30 minutes
-    elif data_span_seconds <= 43200:  # 12 hours or less
+    elif data_span_seconds <= 86400:  # 1 day or less
         tick_interval_seconds = 3600  # Every hour
+    elif data_span_seconds <= 172800:  # 2 days or less
+        tick_interval_seconds = 14400  # Every 4 hours
+    elif data_span_seconds <= 432000:  # 5 days or less
+        tick_interval_seconds = 43200  # Every 12 hours
     else:
-        tick_interval_seconds = 7200  # Every 2 hours
+        tick_interval_seconds = 86400  # Every 24 hours
     
     # Generate tick positions
     first_tick_time = datetime.fromtimestamp(min_timestamp)
@@ -710,10 +819,18 @@ def calculate_time_axis_range_unix(timestamps: List[float]) -> tuple:
         if current_tick >= plot_min:
             tick_positions.append(current_tick)
             tick_time = datetime.fromtimestamp(current_tick)
-            if tick_interval_seconds < 3600:  # Show minutes for sub-hour intervals
-                tick_labels.append(tick_time.strftime('%H:%M'))
-            else:
-                tick_labels.append(tick_time.strftime('%H:%00'))
+            
+            # Format labels based on data span
+            if data_span_seconds <= 86400:  # Single day or less
+                if tick_interval_seconds < 3600:  # Show minutes for sub-hour intervals
+                    tick_labels.append(tick_time.strftime('%H:%M'))
+                else:
+                    tick_labels.append(tick_time.strftime('%H:%M'))
+            else:  # Multiple days
+                if tick_interval_seconds < 43200:  # Less than 12 hours
+                    tick_labels.append(tick_time.strftime('%m/%d %H:%M'))
+                else:  # 12 hours or more
+                    tick_labels.append(tick_time.strftime('%m/%d %H:%M'))
         current_tick += tick_interval_seconds
     
     return plot_min, plot_max, tick_positions, tick_labels
@@ -768,13 +885,12 @@ def calculate_time_axis_range(minutes: List[int]) -> tuple:
     return plot_min, plot_max, tick_positions, tick_labels
 
 
-def plot_social_data(records: List[Dict[str, Any]], filename: str = "", device_id: str = "", output_dir: str = "./analysis_social/figures") -> None:
+def plot_social_data_from_csv(csv_dir: str = "./analysis_social/output", device_id: str = "", output_dir: str = "./analysis_social/output") -> None:
     """
-    Generate plots for social interaction data
+    Generate plots for social interaction data from CSV files
     
     Args:
-        records: List of decoded social records
-        filename: Source filename (used to extract recording date for proper timestamps)
+        csv_dir: Directory containing CSV files
         device_id: Device ID for plot titles
         output_dir: Directory to save plot files
     """
@@ -786,30 +902,96 @@ def plot_social_data(records: List[Dict[str, Any]], filename: str = "", device_i
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
     
-    # Extract recording date from filename for proper timestamp conversion
-    recording_date = None
-    use_unix_timestamps = False
+    # Find CSV files
+    csv_files = []
+    for filename in os.listdir(csv_dir):
+        if filename.endswith('.csv') and 'events' in filename:
+            csv_files.append(os.path.join(csv_dir, filename))
     
-    if filename:
-        recording_date = extract_recording_day_from_filename(filename)
-        if recording_date:
-            use_unix_timestamps = True
-            print(f"Using recording date {recording_date.strftime('%Y-%m-%d')} from filename for timestamp conversion")
+    if not csv_files:
+        print("No CSV files found for plotting")
+        return
+    
+    # Extract prefix from first CSV filename (includes full date range)
+    first_csv = os.path.basename(csv_files[0])
+    if '_' in first_csv:
+        # Extract everything before the last underscore (removes _events.csv)
+        parts = first_csv.split('_')
+        if len(parts) >= 2:
+            prefix = '_'.join(parts[:-1]) + '_'  # e.g., "DCC1AB_250926-250927_"
         else:
-            print("Could not extract recording date from filename, using minute-of-day values")
+            prefix = first_csv.split('_')[0] + '_'
+    else:
+        prefix = ""
     
-    # Clear existing files in the figures directory
+    # Load data from CSV files
+    all_data = []
+    
+    for csv_file in csv_files:
+        with open(csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                all_data.append(row)
+    
+    # Convert CSV data to plot format
+    records = []
+    for row in all_data:
+        # Use local_timestamp from CSV for plotting
+        local_timestamp = float(row['local_timestamp']) if row.get('local_timestamp') else 0.0
+        
+        record = {
+            'record_type': row['record_type'],
+            'minute_of_day': int(row['minute_of_day']),
+            'local_timestamp': local_timestamp,
+            'device_count': int(row['device_count']),
+            'motion_count': int(row['motion_count']),
+            'battery_level': int(row['battery_level']),
+            'temperature_c': int(row['temperature_c']),
+            'event_name': row.get('event_name', ''),
+            'source_file': row.get('source_file', ''),
+            'source_device_id': row.get('source_device_id', ''),
+            'source_recording_date': datetime.strptime(row['source_recording_date'], '%Y-%m-%d') if row.get('source_recording_date') else None,
+            'devices': []
+        }
+        
+        # Parse device data if available (only for device scan records)
+        if row['record_type'] in ['device_scan', 'no_device_proximity'] and row.get('device_macs') and row.get('device_rssis'):
+            import json
+            try:
+                device_macs = json.loads(row['device_macs'])
+                device_rssis = json.loads(row['device_rssis'])
+                for mac, rssi in zip(device_macs, device_rssis):
+                    record['devices'].append({
+                        'device_name': mac,
+                        'rssi_dbm': int(rssi)
+                    })
+            except (json.JSONDecodeError, ValueError):
+                pass
+        
+        records.append(record)
+    
+    # Sort records by local_timestamp (same as CSV)
+    records.sort(key=lambda x: x['local_timestamp'])
+    
+    # Use local timestamps directly from CSV
+    use_unix_timestamps = True
+    print("Using local timestamps directly from CSV data")
+    
+    # Clear existing plot files in the output directory (keep CSV files)
     if os.path.exists(output_dir):
         for filename in os.listdir(output_dir):
-            file_path = os.path.join(output_dir, filename)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-                print(f"Deleted existing file: {filename}")
+            if filename.endswith('.jpg') or filename.endswith('.png'):
+                file_path = os.path.join(output_dir, filename)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
     
     # Separate records by type
     device_scan_records = [r for r in records if r['record_type'] == 'device_scan']
     system_event_records = [r for r in records if r['record_type'] == 'system_event']
     no_device_proximity_records = [r for r in records if r['record_type'] == 'no_device_proximity']
+    
+    # Filter out system events for sensor data plots (motion, battery, temperature)
+    sensor_records = [r for r in records if r['record_type'] != 'system_event']
     
     # Calculate global time range once for consistent axis limits across all plots
     global_plot_min = None
@@ -818,426 +1000,289 @@ def plot_social_data(records: List[Dict[str, Any]], filename: str = "", device_i
     global_tick_labels = None
     
     if records:
-        if use_unix_timestamps and recording_date:
-            # Calculate global range using Unix timestamps
-            all_timestamps = [convert_minute_of_day_to_unix_timestamp(r['minute_of_day'], recording_date) for r in records]
-            global_plot_min, global_plot_max, global_tick_positions, global_tick_labels = calculate_time_axis_range_unix(all_timestamps)
-        else:
-            # Calculate global range using minute_of_day values
-            all_minutes = [r['minute_of_day'] for r in records]
-            global_plot_min, global_plot_max, global_tick_positions, global_tick_labels = calculate_time_axis_range(all_minutes)
+        # Use local timestamps directly from CSV
+        all_timestamps = [r['local_timestamp'] for r in records]
+        global_plot_min, global_plot_max, global_tick_positions, global_tick_labels = calculate_time_axis_range_unix(all_timestamps)
         
         print(f"Global plot range: {global_plot_min} to {global_plot_max} ({len(global_tick_positions)} ticks)")
     
-    # Plot 1: Device detection timeline
-    if device_scan_records or no_device_proximity_records:
-        plt.figure(figsize=(15, 8))
-        
-        if use_unix_timestamps and recording_date:
-            # Convert minute_of_day to Unix timestamps
-            timestamps = [convert_minute_of_day_to_unix_timestamp(r['minute_of_day'], recording_date) for r in records]
-            device_counts = [r['device_count'] for r in records]
-            
-            plt.scatter(timestamps, device_counts, c='blue', alpha=0.7, s=50, edgecolors='darkblue', linewidth=0.5)
-            
-            # Use global axis range for consistency
-            plt.xlim(global_plot_min, global_plot_max)
-            plt.xticks(global_tick_positions, global_tick_labels, rotation=45)
-            
-            plt.xlabel('Local Time')
-            device_title = f" (Device: {device_id})" if device_id else ""
-            plt.title(f'Social Interaction Timeline - Device Detections{device_title} ({recording_date.strftime("%Y-%m-%d")})')
-        else:
-            # Fallback to minute_of_day values
-            minutes = [r['minute_of_day'] for r in records]
-            device_counts = [r['device_count'] for r in records]
-            
-            plt.scatter(minutes, device_counts, c='blue', alpha=0.7, s=50, edgecolors='darkblue', linewidth=0.5)
-            
-            # Use global axis range for consistency
-            plt.xlim(global_plot_min, global_plot_max)
-            plt.xticks(global_tick_positions, global_tick_labels, rotation=45)
-            
-            plt.xlabel('Time of Day')
-            device_title = f" (Device: {device_id})" if device_id else ""
-            plt.title(f'Social Interaction Timeline - Device Detections{device_title}')
-        
-        plt.ylabel('Number of Devices Detected')
-        plt.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'device_timeline.jpg'), dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    # Plot 2: Motion detection timeline
-    if records:
-        plt.figure(figsize=(15, 6))
-        
-        if use_unix_timestamps and recording_date:
-            # Convert minute_of_day to Unix timestamps
-            timestamps = [convert_minute_of_day_to_unix_timestamp(r['minute_of_day'], recording_date) for r in records]
-            motion_counts = [r['motion_count'] for r in records]
-            
-            plt.scatter(timestamps, motion_counts, c='green', alpha=0.7, s=50, edgecolors='darkgreen', linewidth=0.5)
-            plt.xlabel('Local Time')
-            device_title = f" (Device: {device_id})" if device_id else ""
-            plt.title(f'Motion Detection Timeline{device_title} ({recording_date.strftime("%Y-%m-%d")})')
-        else:
-            # Fallback to minute_of_day values
-            minutes = [r['minute_of_day'] for r in records]
-            motion_counts = [r['motion_count'] for r in records]
-            
-            plt.scatter(minutes, motion_counts, c='green', alpha=0.7, s=50, edgecolors='darkgreen', linewidth=0.5)
-            plt.xlabel('Time of Day')
-            device_title = f" (Device: {device_id})" if device_id else ""
-            plt.title(f'Motion Detection Timeline{device_title}')
-        
-        plt.ylabel('Motion Events per Minute')
-        plt.grid(True, alpha=0.3)
-        
-        # Use global axis range for consistency
-        plt.xlim(global_plot_min, global_plot_max)
-        plt.xticks(global_tick_positions, global_tick_labels, rotation=45)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'motion_timeline.jpg'), dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    # Plot 3: Battery and temperature monitoring
-    if records:
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10))
-        
-        if use_unix_timestamps and recording_date:
-            # Convert minute_of_day to Unix timestamps
-            timestamps = [convert_minute_of_day_to_unix_timestamp(r['minute_of_day'], recording_date) for r in records]
-            battery_levels = [r['battery_level'] for r in records]
-            temperatures = [r['temperature_c'] for r in records]
-            
-            # Battery plot
-            ax1.scatter(timestamps, battery_levels, c='red', alpha=0.7, s=50, edgecolors='darkred', linewidth=0.5)
-            ax1.set_xlabel('Local Time')
-            ax1.set_ylabel('Battery Level (%)')
-            ax1.set_title(f'Battery Level Over Time ({recording_date.strftime("%Y-%m-%d")})')
-            ax1.grid(True, alpha=0.3)
-            ax1.set_ylim(0, 100)
-            
-            # Temperature plot
-            ax2.scatter(timestamps, temperatures, c='orange', alpha=0.7, s=50, edgecolors='darkorange', linewidth=0.5)
-            ax2.set_xlabel('Local Time')
-            ax2.set_ylabel('Temperature (°C)')
-            ax2.set_title(f'Temperature Over Time ({recording_date.strftime("%Y-%m-%d")})')
-            ax2.grid(True, alpha=0.3)
-            
-            # Use global axis range for consistency
-            ax1.set_xlim(global_plot_min, global_plot_max)
-            ax2.set_xlim(global_plot_min, global_plot_max)
-            ax1.set_xticks(global_tick_positions)
-            ax1.set_xticklabels(global_tick_labels, rotation=45)
-            ax2.set_xticks(global_tick_positions)
-            ax2.set_xticklabels(global_tick_labels, rotation=45)
-        else:
-            # Fallback to minute_of_day values
-            minutes = [r['minute_of_day'] for r in records]
-            battery_levels = [r['battery_level'] for r in records]
-            temperatures = [r['temperature_c'] for r in records]
-            
-            # Battery plot
-            ax1.scatter(minutes, battery_levels, c='red', alpha=0.7, s=50, edgecolors='darkred', linewidth=0.5)
-            ax1.set_xlabel('Time of Day')
-            ax1.set_ylabel('Battery Level (%)')
-            ax1.set_title('Battery Level Over Time')
-            ax1.grid(True, alpha=0.3)
-            ax1.set_ylim(0, 100)
-            
-            # Temperature plot
-            ax2.scatter(minutes, temperatures, c='orange', alpha=0.7, s=50, edgecolors='darkorange', linewidth=0.5)
-            ax2.set_xlabel('Time of Day')
-            ax2.set_ylabel('Temperature (°C)')
-            ax2.set_title('Temperature Over Time')
-            ax2.grid(True, alpha=0.3)
-            
-            # Use global axis range for consistency
-            ax1.set_xlim(global_plot_min, global_plot_max)
-            ax2.set_xlim(global_plot_min, global_plot_max)
-            ax1.set_xticks(global_tick_positions)
-            ax1.set_xticklabels(global_tick_labels, rotation=45)
-            ax2.set_xticks(global_tick_positions)
-            ax2.set_xticklabels(global_tick_labels, rotation=45)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'battery_temperature.jpg'), dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    # Plot 4: RSSI Timeline - Device proximity over time
-    if device_scan_records:
-        plt.figure(figsize=(15, 8))
-        
-        # Collect all device data with timestamps
-        device_data = {}
-        for record in device_scan_records:
-            if use_unix_timestamps and recording_date:
-                timestamp = convert_minute_of_day_to_unix_timestamp(record['minute_of_day'], recording_date)
-            else:
-                timestamp = record['minute_of_day']
-            
-            for device in record['devices']:
-                device_name = device.get('device_name', f"MAC_{device['mac_index']}")
-                if device_name not in device_data:
-                    device_data[device_name] = {'timestamps': [], 'rssi': []}
-                device_data[device_name]['timestamps'].append(timestamp)
-                device_data[device_name]['rssi'].append(device['rssi_dbm'])
-        
-        # Plot each device as a separate scatter plot
-        colors = plt.cm.tab10(np.linspace(0, 1, len(device_data)))
-        for i, (device_name, data) in enumerate(device_data.items()):
-            plt.scatter(data['timestamps'], data['rssi'], 
-                       c=[colors[i]], s=60, alpha=0.8, 
-                       label=device_name, edgecolors='black', linewidth=0.5)
-        
-        if use_unix_timestamps and recording_date:
-            plt.xlabel('Local Time')
-            plt.title(f'Device Proximity Timeline - RSSI Signal Strength Over Time ({recording_date.strftime("%Y-%m-%d")})')
-        else:
-            plt.xlabel('Time of Day')
-            plt.title('Device Proximity Timeline - RSSI Signal Strength Over Time')
-        
-        plt.ylabel('RSSI (dBm)')
-        plt.grid(True, alpha=0.3)
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        
-        # Use global axis range for consistency
-        plt.xlim(global_plot_min, global_plot_max)
-        plt.xticks(global_tick_positions, global_tick_labels, rotation=45)
-        
-        # Add RSSI interpretation guide
-        plt.axhline(y=-30, color='green', linestyle='--', alpha=0.5, label='Very Close (~-30 dBm)')
-        plt.axhline(y=-60, color='orange', linestyle='--', alpha=0.5, label='Close (~-60 dBm)')
-        plt.axhline(y=-90, color='red', linestyle='--', alpha=0.5, label='Far (~-90 dBm)')
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'rssi_timeline.jpg'), dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    # Plot 5: Data analysis summary
+    # Single comprehensive plot: 2 rows, 3 columns
     if len(records) > 1:
-        plt.figure(figsize=(12, 8))
+        fig, axes = plt.subplots(2, 3, figsize=(20, 12))
         
+        # Row 1: Record Type Over Time, Motion Count Over Time (bar plot), Temperature Over Time
         # Subplot 1: Record type distribution over time
-        plt.subplot(2, 2, 1)
+        ax1 = axes[0, 0]
+        timestamps = [r['local_timestamp'] for r in records]
+        record_types = [r['record_type'] for r in records]
         
-        if use_unix_timestamps and recording_date:
-            timestamps = [convert_minute_of_day_to_unix_timestamp(r['minute_of_day'], recording_date) for r in records]
-            record_types = [r['record_type'] for r in records]
-            
-            # Create line plot showing record type changes over time
-            type_mapping = {'device_scan': 1, 'system_event': 2, 'no_device_proximity': 0}
-            type_values = [type_mapping.get(rt, 0) for rt in record_types]
-            
-            plt.scatter(timestamps, type_values, c='blue', alpha=0.7, s=40, edgecolors='darkblue', linewidth=0.5)
-            plt.xlabel('Local Time')
-            plt.title(f'Record Type Over Time ({recording_date.strftime("%Y-%m-%d")})')
+        # Create line plot showing record type changes over time
+        type_mapping = {'device_scan': 1, 'system_event': 2, 'no_device_proximity': 0}
+        type_values = [type_mapping.get(rt, 0) for rt in record_types]
+        
+        ax1.scatter(timestamps, type_values, c='blue', alpha=0.7, s=40, edgecolors='darkblue', linewidth=0.5)
+        ax1.set_xlabel('Local Time')
+        # Check if data spans multiple days
+        source_dates = set()
+        for record in records:
+            if record.get('source_recording_date'):
+                source_dates.add(record['source_recording_date'].strftime('%Y-%m-%d'))
+        
+        if len(source_dates) > 1:
+            date_range = f"{min(source_dates)} to {max(source_dates)}"
+            ax1.set_title(f'Record Type Over Time ({date_range})')
         else:
-            minutes = [r['minute_of_day'] for r in records]
-            record_types = [r['record_type'] for r in records]
+            ax1.set_title(f'Record Type Over Time ({min(source_dates) if source_dates else "Unknown Date"})')
+        
+        ax1.set_ylabel('Record Type')
+        ax1.set_yticks([0, 1, 2])
+        ax1.set_yticklabels(['No Device', 'Device Scan', 'System Event'])
+        ax1.grid(True, alpha=0.3)
+        ax1.set_xlim(global_plot_min, global_plot_max)
+        ax1.set_xticks(global_tick_positions)
+        ax1.set_xticklabels(global_tick_labels, rotation=45)
+        
+        # Subplot 2: Motion count over time (time series)
+        ax2 = axes[0, 1]
+        if sensor_records:
+            # Use local timestamps directly from CSV (filter out system events)
+            timestamps = [r['local_timestamp'] for r in sensor_records]
+            motion_counts = [r['motion_count'] for r in sensor_records]
             
-            # Create line plot showing record type changes over time
-            type_mapping = {'device_scan': 1, 'system_event': 2, 'no_device_proximity': 0}
-            type_values = [type_mapping.get(rt, 0) for rt in record_types]
+            ax2.scatter(timestamps, motion_counts, c='orange', alpha=0.7, s=40, edgecolors='darkorange', linewidth=0.5)
+            ax2.set_xlabel('Local Time')
+            ax2.set_ylabel('Motion Events per Minute')
+            ax2.set_title('Motion Count Over Time')
+            ax2.grid(True, alpha=0.3)
+            ax2.set_xlim(global_plot_min, global_plot_max)
+            ax2.set_xticks(global_tick_positions)
+            ax2.set_xticklabels(global_tick_labels, rotation=45)
+        
+        # Subplot 3: Temperature over time
+        ax3 = axes[0, 2]
+        if sensor_records:
+            # Use local timestamps directly from CSV (filter out system events)
+            timestamps = [r['local_timestamp'] for r in sensor_records]
+            temperatures = [r['temperature_c'] for r in sensor_records]
             
-            plt.scatter(minutes, type_values, c='blue', alpha=0.7, s=40, edgecolors='darkblue', linewidth=0.5)
-            plt.xlabel('Time of Day')
-            plt.title('Record Type Over Time')
+            ax3.scatter(timestamps, temperatures, c='red', alpha=0.7, s=40, edgecolors='darkred', linewidth=0.5)
+            ax3.set_xlabel('Local Time')
+            ax3.set_ylabel('Temperature (°C)')
+            ax3.set_title('Temperature Over Time')
+            ax3.grid(True, alpha=0.3)
+            ax3.set_xlim(global_plot_min, global_plot_max)
+            ax3.set_xticks(global_tick_positions)
+            ax3.set_xticklabels(global_tick_labels, rotation=45)
         
-        plt.ylabel('Record Type')
-        plt.yticks([0, 1, 2], ['No Device Proximity', 'Device Scan', 'System Event'])
-        plt.grid(True, alpha=0.3)
+        # Row 2: Battery Level Over Time, Device Proximity Timeline, Social Graph
+        # Subplot 4: Battery level over time
+        ax4 = axes[1, 0]
+        if sensor_records:
+            # Use local timestamps directly from CSV (filter out system events)
+            timestamps = [r['local_timestamp'] for r in sensor_records]
+            battery_levels = [r['battery_level'] for r in sensor_records]
+            
+            ax4.scatter(timestamps, battery_levels, c='red', alpha=0.7, s=40, edgecolors='darkred', linewidth=0.5)
+            ax4.set_xlabel('Local Time')
+            ax4.set_ylabel('Battery Level (%)')
+            ax4.set_title('Battery Level Over Time')
+            ax4.grid(True, alpha=0.3)
+            ax4.set_ylim(0, 100)
+            ax4.set_xlim(global_plot_min, global_plot_max)
+            ax4.set_xticks(global_tick_positions)
+            ax4.set_xticklabels(global_tick_labels, rotation=45)
         
-        # Use global axis range for consistency
-        plt.xlim(global_plot_min, global_plot_max)
-        plt.xticks(global_tick_positions, global_tick_labels, rotation=45)
-        
-        # Subplot 2: Device count over time
-        plt.subplot(2, 2, 2)
+        # Subplot 5: Device proximity timeline (with legend for all unique devices)
+        ax5 = axes[1, 1]
         if device_scan_records:
-            if use_unix_timestamps and recording_date:
-                timestamps = [convert_minute_of_day_to_unix_timestamp(r['minute_of_day'], recording_date) for r in device_scan_records]
-                device_counts = [r['device_count'] for r in device_scan_records]
-                plt.scatter(timestamps, device_counts, c='green', alpha=0.7, s=40, edgecolors='darkgreen', linewidth=0.5)
-                plt.xlabel('Local Time')
-                plt.title(f'Device Count Over Time ({recording_date.strftime("%Y-%m-%d")})')
+            # Collect all device data with timestamps
+            device_data = {}
+            for record in device_scan_records:
+                # Use local timestamp directly from CSV
+                timestamp = record['local_timestamp']
+                
+                for device in record['devices']:
+                    device_name = device.get('device_name', 'Unknown_Device')
+                    if device_name not in device_data:
+                        device_data[device_name] = {'timestamps': [], 'rssi': []}
+                    device_data[device_name]['timestamps'].append(timestamp)
+                    device_data[device_name]['rssi'].append(device['rssi_dbm'])
+            
+            # Plot each device with a unique color
+            colors = plt.cm.tab20(np.linspace(0, 1, len(device_data)))
+            for i, (device_name, data) in enumerate(device_data.items()):
+                ax5.scatter(data['timestamps'], data['rssi'], 
+                           c=[colors[i]], alpha=0.7, s=50, 
+                           edgecolors='black', linewidth=0.5, label=device_name)
+            
+            ax5.set_xlabel('Local Time')
+            ax5.set_ylabel('RSSI (dBm)')
+            if len(source_dates) > 1:
+                date_range = f"{min(source_dates)} to {max(source_dates)}"
+                ax5.set_title(f'Device Proximity Timeline - RSSI Signal Strength Over Time ({date_range})')
             else:
-                minutes = [r['minute_of_day'] for r in device_scan_records]
-                device_counts = [r['device_count'] for r in device_scan_records]
-                plt.scatter(minutes, device_counts, c='green', alpha=0.7, s=40, edgecolors='darkgreen', linewidth=0.5)
-                plt.xlabel('Time of Day')
-                plt.title('Device Count Over Time')
+                ax5.set_title(f'Device Proximity Timeline - RSSI Signal Strength Over Time ({min(source_dates) if source_dates else "Unknown Date"})')
             
-            plt.ylabel('Number of Devices')
-            plt.grid(True, alpha=0.3)
+            ax5.grid(True, alpha=0.3)
+            ax5.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            ax5.set_xlim(global_plot_min, global_plot_max)
+            ax5.set_xticks(global_tick_positions)
+            ax5.set_xticklabels(global_tick_labels, rotation=45)
             
-            # Use global axis range for consistency
-            plt.xlim(global_plot_min, global_plot_max)
-            plt.xticks(global_tick_positions, global_tick_labels, rotation=45)
+            # Add RSSI interpretation guide
+            ax5.axhline(y=-30, color='green', linestyle='--', alpha=0.5, label='Very Close (~-30 dBm)')
+            ax5.axhline(y=-60, color='orange', linestyle='--', alpha=0.5, label='Close (~-60 dBm)')
+            ax5.axhline(y=-90, color='red', linestyle='--', alpha=0.5, label='Far (~-90 dBm)')
         
-        # Subplot 3: Motion count over time
-        plt.subplot(2, 2, 3)
-        
-        if use_unix_timestamps and recording_date:
-            timestamps = [convert_minute_of_day_to_unix_timestamp(r['minute_of_day'], recording_date) for r in records]
-            motion_counts = [r['motion_count'] for r in records]
-            plt.scatter(timestamps, motion_counts, c='orange', alpha=0.7, s=40, edgecolors='darkorange', linewidth=0.5)
-            plt.xlabel('Local Time')
-            plt.title(f'Motion Count Over Time ({recording_date.strftime("%Y-%m-%d")})')
-        else:
-            minutes = [r['minute_of_day'] for r in records]
-            motion_counts = [r['motion_count'] for r in records]
-            plt.scatter(minutes, motion_counts, c='orange', alpha=0.7, s=40, edgecolors='darkorange', linewidth=0.5)
-            plt.xlabel('Time of Day')
-            plt.title('Motion Count Over Time')
-        
-        plt.ylabel('Motion Events per Minute')
-        plt.grid(True, alpha=0.3)
-        
-        # Use global axis range for consistency
-        plt.xlim(global_plot_min, global_plot_max)
-        plt.xticks(global_tick_positions, global_tick_labels, rotation=45)
-        
-        # Subplot 4: Average RSSI over time (if device data available)
-        plt.subplot(2, 2, 4)
+        # Subplot 6: Social Graph
+        ax6 = axes[1, 2]
         if device_scan_records:
-            timestamps = []
-            avg_rssi = []
+            # Collect device detection data from source device perspective
+            device_detection_counts = {}
+            source_device_id = device_id  # Our source device
+            
             for record in device_scan_records:
                 if record['devices']:
-                    if use_unix_timestamps and recording_date:
-                        timestamp = convert_minute_of_day_to_unix_timestamp(record['minute_of_day'], recording_date)
-                    else:
-                        timestamp = record['minute_of_day']
-                    timestamps.append(timestamp)
-                    rssi_values = [device['rssi_dbm'] for device in record['devices']]
-                    avg_rssi.append(sum(rssi_values) / len(rssi_values))
+                    for device in record['devices']:
+                        device_name = device.get('device_name', 'Unknown_Device')
+                        if device_name not in device_detection_counts:
+                            device_detection_counts[device_name] = 0
+                        device_detection_counts[device_name] += 1
             
-            if avg_rssi:
-                plt.scatter(timestamps, avg_rssi, c='purple', alpha=0.7, s=40, edgecolors='indigo', linewidth=0.5)
+            if device_detection_counts:
+                # Create star topology graph with source device at center
+                G = nx.Graph()
                 
-                if use_unix_timestamps and recording_date:
-                    plt.xlabel('Local Time')
-                    plt.title(f'Average RSSI Over Time ({recording_date.strftime("%Y-%m-%d")})')
-                else:
-                    plt.xlabel('Time of Day')
-                    plt.title('Average RSSI Over Time')
+                # Add source device as central node
+                G.add_node(source_device_id, node_type='source')
                 
-                plt.ylabel('Average RSSI (dBm)')
-                plt.grid(True, alpha=0.3)
+                # Add detected devices as peripheral nodes
+                for device_name, count in device_detection_counts.items():
+                    G.add_node(device_name, node_type='detected')
+                    # Add edge from source to detected device with weight based on detection count
+                    G.add_edge(source_device_id, device_name, weight=count)
                 
-                # Use global axis range for consistency
-                plt.xlim(global_plot_min, global_plot_max)
-                plt.xticks(global_tick_positions, global_tick_labels, rotation=45)
-            else:
-                plt.text(0.5, 0.5, 'No RSSI data available', ha='center', va='center', transform=plt.gca().transAxes)
-                if use_unix_timestamps and recording_date:
-                    plt.title(f'Average RSSI Over Time ({recording_date.strftime("%Y-%m-%d")})')
-                else:
-                    plt.title('Average RSSI Over Time')
-        else:
-            plt.text(0.5, 0.5, 'No device scan data available', ha='center', va='center', transform=plt.gca().transAxes)
-            if use_unix_timestamps and recording_date:
-                plt.title(f'Average RSSI Over Time ({recording_date.strftime("%Y-%m-%d")})')
-            else:
-                plt.title('Average RSSI Over Time')
+                # Position nodes manually for star topology
+                pos = {}
+                center_x, center_y = 0, 0
+                pos[source_device_id] = (center_x, center_y)
+                
+                # Position detected devices in a circle around the source
+                detected_devices = [node for node in G.nodes() if node != source_device_id]
+                if detected_devices:
+                    import math
+                    radius = 1.5
+                    for i, device in enumerate(detected_devices):
+                        angle = 2 * math.pi * i / len(detected_devices)
+                        x = center_x + radius * math.cos(angle)
+                        y = center_y + radius * math.sin(angle)
+                        pos[device] = (x, y)
+                
+                # Draw the graph
+                # Source device (center) - same size but different color
+                nx.draw_networkx_nodes(G, pos, nodelist=[source_device_id], 
+                                     node_color='red', node_size=500, alpha=0.8, ax=ax6)
+                
+                # Detected devices (periphery) - same size as source
+                detected_nodes = [node for node in G.nodes() if node != source_device_id]
+                if detected_nodes:
+                    nx.draw_networkx_nodes(G, pos, nodelist=detected_nodes, 
+                                         node_color='lightblue', node_size=500, alpha=0.8, ax=ax6)
+                
+                # Draw labels
+                nx.draw_networkx_labels(G, pos, ax=ax6, font_size=8)
+                
+                # Draw edges with weights proportional to detection count
+                edges = G.edges()
+                weights = [G[u][v]['weight'] for u, v in edges]
+                max_weight = max(weights) if weights else 1
+                normalized_weights = [w / max_weight for w in weights]
+                
+                nx.draw_networkx_edges(G, pos, ax=ax6, width=[w*8 for w in normalized_weights], 
+                                     alpha=0.7, edge_color='gray')
+                
+                ax6.set_title(f'Social Graph - {source_device_id} Detections')
+                ax6.axis('off')
+                
+                # Add legend
+                ax6.scatter([], [], c='red', s=100, label=f'Source: {source_device_id}')
+                ax6.scatter([], [], c='lightblue', s=50, label='Detected Devices')
+                ax6.legend(loc='upper right', fontsize=8)
         
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'social_summary.jpg'), dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(output_dir, f'{prefix}social_analysis.jpg'), dpi=300, bbox_inches='tight')
         plt.close()
 
 
-def export_social_data_to_csv(records: List[Dict[str, Any]], filename: str = "", output_dir: str = "./analysis_social", use_local_time: bool = True) -> None:
+def export_social_data_to_csv(records: List[Dict[str, Any]], filenames: List[str] = None, output_dir: str = "./analysis_social/output", use_local_time: bool = True) -> None:
     """
     Export social data to CSV files, separated by event type
     
     Args:
         records: List of decoded social records
-        filename: Source filename (used to extract recording date for proper timestamps)
+        filenames: List of source filenames (used to generate date range prefix and extract recording dates)
         output_dir: Directory to save CSV files
         use_local_time: Whether to use local time format for display strings
     """
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
     
-    # Extract recording date from filename for proper timestamp conversion
-    recording_date = None
-    use_timestamp_conversion = False
+    # Clear existing CSV and TXT files in the output directory
+    if os.path.exists(output_dir):
+        for filename in os.listdir(output_dir):
+            if filename.endswith('.csv') or filename.endswith('.txt') or filename.endswith('.jpg'):
+                file_path = os.path.join(output_dir, filename)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
     
-    if filename:
-        recording_date = extract_recording_day_from_filename(filename)
-        if recording_date:
-            use_timestamp_conversion = True
-            print(f"CSV export using recording date {recording_date.strftime('%Y-%m-%d')} for UTC/local timestamp conversion")
+    # Copy all TXT files from analysis_social directory to output directory
+    analysis_dir = "./analysis_social"
+    if os.path.exists(analysis_dir):
+        import shutil
+        for filename in os.listdir(analysis_dir):
+            if filename.endswith('.txt'):
+                src_path = os.path.join(analysis_dir, filename)
+                if os.path.isfile(src_path):
+                    dest_path = os.path.join(output_dir, filename)
+                    shutil.copy2(src_path, dest_path)
+                    print(f"Copied file: {filename}")
     
-    # Separate records by type
-    system_events = [r for r in records if r['record_type'] == 'system_event']
-    social_events = [r for r in records if r['record_type'] in ['device_scan', 'no_device_proximity']]
+    # Generate filename prefix from all filenames
+    if filenames:
+        device_date_prefix = generate_device_date_range_prefix(filenames)
+        prefix = f"{device_date_prefix}_" if device_date_prefix else ""
+        print(f"CSV export using per-record source_recording_date for UTC/local timestamp conversion")
+    else:
+        prefix = ""
     
-    # Export System Events CSV
-    if system_events:
-        system_csv_path = os.path.join(output_dir, 'system_events.csv')
-        with open(system_csv_path, 'w', newline='') as csvfile:
-            fieldnames = ['minute_of_day', 'utc_timestamp', 'local_timestamp', 'utc_datetime', 'local_datetime', 
-                         'event_type', 'event_name', 'battery_level', 'temperature_c']
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            
-            writer.writeheader()
-            for record in system_events:
-                if use_timestamp_conversion and recording_date:
-                    # Convert minute_of_day to both UTC and local timestamps
-                    utc_timestamp, local_timestamp = convert_minute_of_day_to_timestamps(record['minute_of_day'], recording_date)
-                    utc_datetime = datetime.fromtimestamp(utc_timestamp, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-                    local_datetime = datetime.fromtimestamp(local_timestamp).strftime('%Y-%m-%d %H:%M:%S')
-                else:
-                    # Fallback to original values
-                    utc_timestamp = ''
-                    local_timestamp = record.get('absolute_timestamp', '')
-                    utc_datetime = ''
-                    local_datetime = record['time'] if use_local_time else convert_minute_to_local_time(record['minute_of_day'], False)
-                
-                writer.writerow({
-                    'minute_of_day': record['minute_of_day'],
-                    'utc_timestamp': utc_timestamp,
-                    'local_timestamp': local_timestamp,
-                    'utc_datetime': utc_datetime,
-                    'local_datetime': local_datetime,
-                    'event_type': record['record_type'],
-                    'event_name': record.get('event_name', ''),
-                    'battery_level': record['battery_level'],
-                    'temperature_c': record['temperature_c']
-                })
-        print(f"System events exported to: {system_csv_path}")
-    
-    # Export Social Events CSV
-    if social_events:
-        social_csv_path = os.path.join(output_dir, 'social_events.csv')
+    # Export combined events CSV
+    if records:
+        events_csv_path = os.path.join(output_dir, f'{prefix}events.csv')
         
-        with open(social_csv_path, 'w', newline='') as csvfile:
-            # Create fieldnames with JSON-encoded device columns and UTC/local timestamps
+        with open(events_csv_path, 'w', newline='') as csvfile:
+            # Create fieldnames with all possible columns
             fieldnames = ['minute_of_day', 'utc_timestamp', 'local_timestamp', 'utc_datetime', 'local_datetime',
-                         'record_type', 'device_count', 'motion_count', 'battery_level', 'temperature_c', 
-                         'device_macs', 'device_rssis']
+                         'record_type', 'event_name', 'device_count', 'motion_count', 'battery_level', 'temperature_c', 
+                         'device_macs', 'device_rssis', 'source_file', 'source_device_id', 'source_recording_date']
             
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             
-            for record in social_events:
-                # Extract device MACs and RSSIs
+            for record in records:
+                # Extract device MACs and RSSIs (only for device scan records)
                 device_macs = []
                 device_rssis = []
                 
-                for device in record.get('devices', []):
-                    device_macs.append(device.get('device_name', f"MAC_{device['mac_index']}"))
-                    device_rssis.append(device['rssi_dbm'])
+                if record['record_type'] in ['device_scan', 'no_device_proximity']:
+                    for device in record.get('devices', []):
+                        device_macs.append(device.get('device_name', 'Unknown_Device'))
+                        device_rssis.append(device['rssi_dbm'])
                 
-                if use_timestamp_conversion and recording_date:
-                    # Convert minute_of_day to both UTC and local timestamps
-                    utc_timestamp, local_timestamp = convert_minute_of_day_to_timestamps(record['minute_of_day'], recording_date)
+                # Use the record's own source_recording_date for timestamp conversion
+                record_date = record.get('source_recording_date')
+                if record_date:
+                    # Convert minute_of_day to both UTC and local timestamps using the record's date
+                    utc_timestamp, local_timestamp = convert_minute_of_day_to_timestamps(record['minute_of_day'], record_date)
                     utc_datetime = datetime.fromtimestamp(utc_timestamp, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
                     local_datetime = datetime.fromtimestamp(local_timestamp).strftime('%Y-%m-%d %H:%M:%S')
                 else:
@@ -1254,16 +1299,20 @@ def export_social_data_to_csv(records: List[Dict[str, Any]], filename: str = "",
                     'utc_datetime': utc_datetime,
                     'local_datetime': local_datetime,
                     'record_type': record['record_type'],
+                    'event_name': record.get('event_name', ''),
                     'device_count': record['device_count'],
                     'motion_count': record['motion_count'],
                     'battery_level': record['battery_level'],
                     'temperature_c': record['temperature_c'],
                     'device_macs': json.dumps(device_macs) if device_macs else '',
-                    'device_rssis': json.dumps(device_rssis) if device_rssis else ''
+                    'device_rssis': json.dumps(device_rssis) if device_rssis else '',
+                    'source_file': record.get('source_file', ''),
+                    'source_device_id': record.get('source_device_id', ''),
+                    'source_recording_date': record.get('source_recording_date', '').strftime('%Y-%m-%d') if record.get('source_recording_date') else ''
                 }
                 
                 writer.writerow(row_data)
-        print(f"Social events exported to: {social_csv_path}")
+        print(f"All events exported to: {events_csv_path}")
 
 
 def print_social_summary(records: List[Dict[str, Any]]) -> None:
@@ -1313,9 +1362,8 @@ def print_social_summary(records: List[Dict[str, Any]]) -> None:
             print(f"    Battery: {record['battery_level']}%, Temperature: {record['temperature_c']}°C")
             if record['devices']:
                 for j, device in enumerate(record['devices']):
-                    device_name = device.get('device_name', f"MAC_{device['mac_index']}")
-                    mac_address = device.get('mac_address', f"Index_{device['mac_index']}")
-                    print(f"      Device {j+1}: {device_name} ({mac_address}), RSSI {device['rssi_dbm']} dBm")
+                    device_name = device.get('device_name', 'Unknown_Device')
+                    print(f"      Device {j+1}: {device_name}, RSSI {device['rssi_dbm']} dBm")
             print()
         
         if len(records) > 10:
@@ -1328,6 +1376,42 @@ def main():
     """
     import sys
     
+    # Check for CSV simulation mode
+    if len(sys.argv) > 1 and sys.argv[1] == '--simulation':
+        print("Social Data Decoder - Simulation Mode")
+        print("====================================")
+        
+        # Look for simulation CSV file
+        simulation_dir = './analysis_social/simulation'
+        if not os.path.exists(simulation_dir):
+            print(f"Simulation directory '{simulation_dir}' not found!")
+            return
+        
+        csv_files = [f for f in os.listdir(simulation_dir) if f.endswith('.csv')]
+        if not csv_files:
+            print("Error: No CSV files found in simulation directory!")
+            return
+        
+        # Use the first CSV file found
+        csv_file = os.path.join(simulation_dir, csv_files[0])
+        print(f"Using simulation data: {csv_files[0]}")
+        
+        # Extract device ID from filename
+        device_id = csv_files[0].split('_')[0] if '_' in csv_files[0] else "UNKNOWN"
+        print(f"Device ID: {device_id}")
+        
+        # Generate plots directly from CSV
+        if PLOTTING_AVAILABLE:
+            print(f"\nGenerating plots from simulation CSV...")
+            plot_social_data_from_csv(csv_dir=simulation_dir, device_id=device_id)
+            print(f"Plots saved to ./analysis_social/output/ directory")
+        else:
+            print(f"\nSkipping plot generation (matplotlib/numpy not available)")
+            print("Install with: pip install matplotlib numpy")
+        
+        print("\nSimulation complete!")
+        return
+    
     # Look for the most recent juxta file in the analysis directory
     analysis_dir = './analysis_social'
     if not os.path.exists(analysis_dir):
@@ -1337,37 +1421,34 @@ def main():
     print("Social Data Decoder and Record Analyzer")
     print("======================================")
     
-    # Find the single social data file
-    test_file = find_social_file(analysis_dir)
+    # Find all social data files
+    test_files = find_social_files(analysis_dir)
     
-    if not test_file:
+    if not test_files:
         print("Error: No valid social data files found in analysis directory!")
-        print("Please ensure there's a single JX_DEVICEID_YYMMDD.txt file with social data in the ./analysis_social directory.")
+        print("Please ensure there are JX_DEVICEID_YYMMDD.txt files with social data in the ./analysis_social directory.")
         return
     
-    # Show which file was selected and extract device ID
-    filename = os.path.basename(test_file)
-    device_id = extract_device_id_from_filename(filename)
-    print(f"Selected file: {filename}")
+    # Show which files were found and extract device ID
+    print(f"Found {len(test_files)} social data file(s):")
+    device_ids = set()
+    for test_file in test_files:
+        filename = os.path.basename(test_file)
+        device_id = extract_device_id_from_filename(filename)
+        if device_id:
+            device_ids.add(device_id)
+        print(f"  - {filename}")
     
+    # Check if all files are from the same device
+    if len(device_ids) > 1:
+        print(f"Warning: Files from multiple devices found: {', '.join(device_ids)}")
+        print("This may cause issues with MAC address resolution and analysis.")
+    
+    device_id = list(device_ids)[0] if device_ids else None
     if device_id:
-        print(f"Device ID: {device_id}")
-        
-        # Extract and show recording date
-        jx_pattern = re.compile(r'JX_([A-Z0-9]+)_(\d{6})\.txt')
-        match = jx_pattern.match(filename)
-        if match:
-            recording_date_str = match.group(2)
-            try:
-                year = 2000 + int(recording_date_str[:2])
-                month = int(recording_date_str[2:4])
-                day = int(recording_date_str[4:6])
-                recording_date = datetime(year, month, day)
-                print(f"Recording date: {recording_date.strftime('%Y-%m-%d')}")
-            except ValueError:
-                pass
+        print(f"Primary device ID: {device_id}")
     else:
-        print("Warning: Could not extract device ID from filename")
+        print("Warning: Could not extract device ID from filenames")
     print()
     
     # Check command line arguments for analysis mode and time format
@@ -1402,31 +1483,30 @@ def main():
     
     try:
         if analysis_mode:
-            # Record analysis mode
-            print(f"Running comprehensive record analysis on: {test_file}")
+            # Record analysis mode - analyze each file separately
+            print(f"Running comprehensive record analysis on {len(test_files)} file(s)...")
             print()
-            records = analyze_social_records(test_file, mac_table, use_local_time=use_local_time)
+            all_records = []
+            for test_file in test_files:
+                print(f"Analyzing: {os.path.basename(test_file)}")
+                file_records = analyze_social_records(test_file, mac_table, use_local_time=use_local_time)
+                all_records.extend(file_records)
             
             # Resolve MAC addresses if MAC table is available
             if mac_table:
-                records = resolve_mac_addresses(records, mac_table)
+                all_records = resolve_mac_addresses(all_records, mac_table)
                 print("MAC addresses resolved using MACIDX file")
             
-            print_record_summary(records)
+            print_record_summary(all_records)
             
         else:
-            # Standard decoding mode
-            print(f"Decoding file: {test_file}")
-            records = decode_social_file(test_file, use_local_time=use_local_time)
+            # Standard decoding mode - combine data from all files
+            print(f"Combining data from {len(test_files)} file(s)...")
+            records = combine_social_data_from_files(test_files, mac_table, use_local_time=use_local_time)
             
             if not records:
-                print("No valid records found in the file.")
+                print("No valid records found in any file.")
                 return
-            
-            # Resolve MAC addresses if MAC table is available
-            if mac_table:
-                records = resolve_mac_addresses(records, mac_table)
-                print("MAC addresses resolved using MACIDX file")
             
             # Check if we have RSSI data and warn about missing MACIDX if needed
             device_scan_records = [r for r in records if r['record_type'] == 'device_scan']
@@ -1438,15 +1518,15 @@ def main():
             # Print summary
             print_social_summary(records)
             
-            # Export to CSV
+            # Export to CSV first (use all files for date range naming)
             print(f"\nExporting data to CSV...")
-            export_social_data_to_csv(records, test_file, use_local_time=use_local_time)
+            export_social_data_to_csv(records, test_files, use_local_time=use_local_time)
             
-            # Generate plots (if available)
+            # Generate plots from CSV data (if available)
             if PLOTTING_AVAILABLE:
-                print(f"\nGenerating plots...")
-                plot_social_data(records, test_file, device_id)
-                print(f"Plots saved to ./analysis_social/figures/ directory")
+                print(f"\nGenerating plots from CSV data...")
+                plot_social_data_from_csv(device_id=device_id)
+                print(f"Plots saved to ./analysis_social/output/ directory")
             else:
                 print(f"\nSkipping plot generation (matplotlib/numpy not available)")
                 print("Install with: pip install matplotlib numpy")
@@ -1456,6 +1536,7 @@ def main():
             # Show usage hint
             print("\n💡 Tip: Run with --header or -h for comprehensive record analysis")
             print("💡 Tip: Run with --simple-time or -s to use HH:MM format instead of local timestamps")
+            print("💡 Tip: Run with --simulation to generate plots from simulation CSV data")
         
     except Exception as e:
         print(f"Error during processing: {e}")

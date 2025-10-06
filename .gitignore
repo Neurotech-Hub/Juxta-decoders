@@ -86,3 +86,4 @@ analysis_social/
 **/*.temp
 *.tmp
 *.temp
+*.csv
